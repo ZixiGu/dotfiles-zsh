@@ -15,6 +15,7 @@ setopt HIST_IGNORE_DUPS
 setopt SHARE_HISTORY
 
 ZSH_THEME="${ZSH_THEME:-dracula/dracula}"
+export DRACULA_TIME_FORMAT="${DRACULA_TIME_FORMAT:-%Y-%m-%d %H:%M:%S}"
 plugins=(
   git
   sudo

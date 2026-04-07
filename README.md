@@ -160,6 +160,7 @@ git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${Z
 - Keep machine-specific values in `~/.zshrc.local` so they do not pollute the shared config.
 - Put secrets, proxies, SSH-agent tweaks, and host-specific exports in `~/.zshrc.local`.
 - Default theme is `dracula/dracula`.
+- Default `DRACULA_TIME_FORMAT` is `%Y-%m-%d %H:%M:%S`.
 - Default plugins are `git`, `sudo`, `colored-man-pages`, `zsh-autosuggestions`, and `zsh-syntax-highlighting`.
 - If a command does not exist, this setup skips its init step.
 - Offline mode supports extracted directories plus `.tar.gz`, `.tgz`, and `.tar` bundles.
