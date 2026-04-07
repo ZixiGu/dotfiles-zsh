@@ -1,0 +1,11 @@
+* text=auto
+
+*.sh text eol=lf
+*.zsh text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.theme text eol=lf
+
+.zshrc text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

@@ -1,0 +1,18 @@
+# Local machine overrides
+.zshrc.local
+*.local
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Temporary logs
+*.log
+
+# Local build/output dirs
+.build-offline/
+.build-zsh/
