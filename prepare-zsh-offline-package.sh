@@ -73,9 +73,7 @@ prepare_rhel() {
   echo "Preparing RHEL/Rocky/CentOS offline zsh package set"
 
   if have_cmd dnf; then
-    if have_cmd dnf; then
-      dnf download --destdir "$out_dir" zsh ncurses-libs glibc pcre2
-    fi
+    dnf download --destdir "$out_dir" zsh ncurses-libs glibc pcre2
   elif have_cmd yumdownloader; then
     yumdownloader --destdir "$out_dir" zsh ncurses-libs glibc pcre2
   else

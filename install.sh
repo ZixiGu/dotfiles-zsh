@@ -26,7 +26,6 @@ extract_archive() {
   local archive_path="$1"
   local dest_dir="$2"
 
-  rm -rf "$dest_dir"
   mkdir -p "$dest_dir"
 
   case "$archive_path" in
@@ -43,20 +42,29 @@ extract_archive() {
   esac
 }
 
+is_nonempty_dir() {
+  local dir="$1"
+  [[ -d "$dir" ]] && [[ -n "$(find "$dir" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]
+}
+
 install_from_bundle_or_git() {
   local label="$1"
   local bundle_name="$2"
   local repo_url="$3"
   local dest_dir="$4"
 
-  if [[ -d "$dest_dir" ]] && [[ -n "$(find "$dest_dir" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
+  if is_nonempty_dir "$dest_dir"; then
     return 0
   fi
 
+  if [[ -e "$dest_dir" && ! -d "$dest_dir" ]]; then
+    echo "Cannot install $label: target exists and is not a directory: $dest_dir"
+    return 1
+  fi
+
   if [[ -d "$LOCAL_BUNDLE_DIR/$bundle_name" ]]; then
-    rm -rf "$dest_dir"
-    mkdir -p "$(dirname "$dest_dir")"
-    cp -R "$LOCAL_BUNDLE_DIR/$bundle_name" "$dest_dir"
+    mkdir -p "$dest_dir"
+    cp -R "$LOCAL_BUNDLE_DIR/$bundle_name"/. "$dest_dir"/
     echo "Installed $label from local directory bundle"
     return 0
   fi

@@ -54,4 +54,5 @@ packages/zsh/
 - Native packages are preferred because they integrate with the system package database.
 - The exact dependency set can vary by target release.
 - If native packages do not match the target OS release, use the `source/` archive and build `zsh 5.9` locally.
-- The repo includes [`install-zsh-offline.sh`](C:\Users\Goo\OneDrive\个人\项目\dotfiles-zsh\install-zsh-offline.sh), which builds from the local source archive into `~/.local/zsh-5.9` by default.
+- The repo includes [`install-zsh-offline.sh`](../../install-zsh-offline.sh), which builds from the local source archive into `~/.local/zsh-5.9` by default.
+- `bootstrap-offline.sh` calls that source-build path automatically when `zsh` is missing. Native `.deb`, `.rpm`, and `.apk` assets are for manual install on matching target systems.

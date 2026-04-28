@@ -41,14 +41,12 @@ ${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 Clone this folder to `~/dotfiles` on the target server, then run:
 
 ```bash
-chmod +x bootstrap.sh
 ./bootstrap.sh
 ```
 
 Or if dependencies are already installed:
 
 ```bash
-chmod +x install.sh
 ./install.sh
 ```
 
@@ -73,7 +71,6 @@ chmod +x install.sh
 To prepare the offline bundles on a machine with internet access:
 
 ```bash
-chmod +x prepare-offline-packages.sh
 ./prepare-offline-packages.sh
 ```
 
@@ -93,14 +90,14 @@ To prepare offline `zsh` assets by target distro family:
 ./prepare-zsh-offline-package.sh source
 ```
 
-That script stores assets under [`packages/zsh/`](C:\Users\Goo\OneDrive\个人\项目\dotfiles-zsh\packages\zsh\README.md) and keeps a `zsh 5.9` source archive as a fallback.
+That script stores assets under [`packages/zsh/`](packages/zsh/README.md) and keeps a `zsh 5.9` source archive as a fallback.
 
-If the target server has no network access, put local bundles under [`packages/`](C:\Users\Goo\OneDrive\个人\项目\dotfiles-zsh\packages\README.md) and run:
+`bootstrap-offline.sh` uses the source archive path automatically when `zsh` is missing. Distro-native packages under `packages/zsh/debian`, `packages/zsh/rhel`, or `packages/zsh/alpine` are prepared for manual install on matching target systems.
+
+If the target server has no network access, put local bundles under [`packages/`](packages/README.md) and run:
 
 ```bash
-chmod +x check-offline-target.sh
 ./check-offline-target.sh
-chmod +x bootstrap-offline.sh
 ./bootstrap-offline.sh
 ```
 
@@ -121,14 +118,12 @@ Supported offline bundle names:
 If you want to install `zsh` from the local source archive manually:
 
 ```bash
-chmod +x install-zsh-offline.sh
 ./install-zsh-offline.sh
 ```
 
 If you want to verify the offline target machine first:
 
 ```bash
-chmod +x check-offline-target.sh
 ./check-offline-target.sh
 ```
 
@@ -164,6 +159,7 @@ git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${Z
 - Default plugins are `git`, `sudo`, `colored-man-pages`, `zsh-autosuggestions`, and `zsh-syntax-highlighting`.
 - If a command does not exist, this setup skips its init step.
 - Offline mode supports extracted directories plus `.tar.gz`, `.tgz`, and `.tar` bundles.
-- For offline `zsh` itself, prefer distro-native packages when the source and target OS families match; otherwise use the bundled `zsh 5.9` source archive and `install-zsh-offline.sh`.
+- This repository may carry generated offline package contents under `packages/`; rerun the prepare scripts to refresh them.
+- For offline `zsh` itself, prefer manually installing distro-native packages when the source and target OS families match; otherwise use the bundled `zsh 5.9` source archive with `bootstrap-offline.sh` or `install-zsh-offline.sh`.
 - `check-offline-target.sh` verifies both local toolchain readiness and whether the required offline bundles are present.
 - The prompt theme is separate from your terminal color scheme; for the full Dracula look, your terminal app should also use a Dracula color preset.
