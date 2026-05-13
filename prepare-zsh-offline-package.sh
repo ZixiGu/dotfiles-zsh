@@ -8,6 +8,13 @@ ZSH_VERSION="${ZSH_VERSION:-5.9}"
 ZSH_SOURCE_URL="https://www.zsh.org/pub/zsh-${ZSH_VERSION}.tar.xz"
 SOURCE_OUT="$PACKAGES_DIR/source/zsh-${ZSH_VERSION}.tar.xz"
 
+REFRESH=0
+for arg in "$@"; do
+  if [[ "$arg" == "--refresh" ]]; then
+    REFRESH=1
+  fi
+done
+
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -39,8 +46,24 @@ download_file() {
   exit 1
 }
 
+source_archive_exists() {
+  for ext in tar.xz tar.gz tgz tar; do
+    if [[ -f "$PACKAGES_DIR/source/zsh-${ZSH_VERSION}.${ext}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 prepare_source() {
+  if [[ "$REFRESH" -eq 0 ]] && source_archive_exists; then
+    echo "zsh ${ZSH_VERSION} source archive already exists under $PACKAGES_DIR/source"
+    echo "Run with --refresh to re-download."
+    return 0
+  fi
+
   echo "Preparing zsh ${ZSH_VERSION} source bundle"
+  echo "(requires internet access)"
   download_file "$ZSH_SOURCE_URL" "$SOURCE_OUT"
   echo "Prepared $SOURCE_OUT"
 }
@@ -53,6 +76,7 @@ prepare_debian() {
   mkdir -p "$out_dir"
 
   echo "Preparing Debian/Ubuntu offline zsh package set"
+  echo "(requires internet access)"
   echo "Using apt to download binary packages into $out_dir"
 
   (
@@ -71,6 +95,7 @@ prepare_rhel() {
   mkdir -p "$out_dir"
 
   echo "Preparing RHEL/Rocky/CentOS offline zsh package set"
+  echo "(requires internet access)"
 
   if have_cmd dnf; then
     dnf download --destdir "$out_dir" zsh ncurses-libs glibc pcre2
@@ -92,6 +117,7 @@ prepare_alpine() {
   mkdir -p "$out_dir"
 
   echo "Preparing Alpine offline zsh package set"
+  echo "(requires internet access)"
 
   if have_cmd apk; then
     apk fetch --output "$out_dir" zsh ncurses-libs musl
@@ -105,6 +131,11 @@ prepare_alpine() {
 }
 
 case "$TARGET_FAMILY" in
+  --refresh)
+    echo "Usage: $0 [source|debian|ubuntu|rhel|rocky|centos|alpine] [--refresh]"
+    echo "Default target: source"
+    exit 1
+    ;;
   source)
     prepare_source
     ;;
