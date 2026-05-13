@@ -4,7 +4,7 @@ set -euo pipefail
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZSH_PACKAGE_DIR="${ZSH_PACKAGE_DIR:-$DOTFILES_DIR/packages/zsh}"
 SOURCE_DIR="$ZSH_PACKAGE_DIR/source"
-BUILD_DIR="${BUILD_DIR:-$DOTFILES_DIR/.build-zsh}"
+BUILD_DIR="${BUILD_DIR:-$HOME/.build-zsh}"
 PREFIX="${PREFIX:-$HOME/.local/zsh-5.9}"
 TARGET_VERSION="${TARGET_VERSION:-5.9}"
 

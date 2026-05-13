@@ -13,6 +13,3 @@ Thumbs.db
 # Temporary logs
 *.log
 
-# Local build/output dirs
-.build-offline/
-.build-zsh/

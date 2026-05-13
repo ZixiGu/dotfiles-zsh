@@ -3,7 +3,7 @@ set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGES_DIR="${PACKAGES_DIR:-$DOTFILES_DIR/packages}"
-WORK_DIR="${WORK_DIR:-$DOTFILES_DIR/.build-offline}"
+WORK_DIR="${WORK_DIR:-$HOME/.build-offline}"
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
