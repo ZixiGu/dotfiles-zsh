@@ -57,8 +57,7 @@ if [[ ! -d "${ZSH:-$HOME/.oh-my-zsh}" ]]; then
   fi
 fi
 
-chmod +x "$DOTFILES_DIR/install.sh"
-"$DOTFILES_DIR/install.sh"
+bash "$DOTFILES_DIR/install.sh"
 
 echo
 echo "Bootstrap complete."

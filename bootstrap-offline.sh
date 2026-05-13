@@ -15,8 +15,7 @@ if [[ ! -d "$LOCAL_BUNDLE_DIR" ]]; then
 fi
 
 if ! have_cmd zsh; then
-  chmod +x "$DOTFILES_DIR/install-zsh-offline.sh"
-  "$DOTFILES_DIR/install-zsh-offline.sh"
+  bash "$DOTFILES_DIR/install-zsh-offline.sh"
   export PATH="$HOME/.local/zsh-5.9/bin:$PATH"
 fi
 
@@ -25,8 +24,7 @@ if ! have_cmd zsh; then
   exit 1
 fi
 
-chmod +x "$DOTFILES_DIR/install.sh"
-OFFLINE=1 LOCAL_BUNDLE_DIR="$LOCAL_BUNDLE_DIR" "$DOTFILES_DIR/install.sh"
+OFFLINE=1 LOCAL_BUNDLE_DIR="$LOCAL_BUNDLE_DIR" bash "$DOTFILES_DIR/install.sh"
 
 echo
 echo "Offline bootstrap complete."
