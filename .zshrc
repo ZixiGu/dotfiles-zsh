@@ -51,3 +51,6 @@ fi
 
 # Keep machine-only overrides out of the shared repo.
 [[ -f "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
+
+# Add ~/.local/bin to PATH (gh CLI, user binaries)
+export PATH="$HOME/.local/bin:$PATH"
