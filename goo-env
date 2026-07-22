@@ -1,0 +1,814 @@
+#!/usr/bin/env bash
+# ==============================================================================
+#  goo-env — Goo 环境管理 CLI
+#
+#  子命令:
+#    bootstrap       新机器一条龙部署 (miniforge3 + dotfiles + Node CLI + env)
+#    check           环境健康检查 (OK/WARN/FAIL 表格 + 退出码)
+#    backup          重建 yml + pip freeze 声明式备份
+#    install-timer   装 systemd user timer, 每天自动 backup
+#    status          一屏汇总 (check 摘要 + yml mtime + timer 状态)
+#    help            列出所有子命令
+#
+#  全局 flag:
+#    --no-color      关闭 ANSI 颜色
+#    --dry-run       只打印不执行 (DRY_RUN=1 等价)
+#
+#  退出码:
+#    0  OK (check 全 OK)
+#    1  FAIL (check 有 FAIL, 或命令错误)
+#    2  WARN (check 只有 WARN)
+# ==============================================================================
+set -euo pipefail
+
+# -------- exit code constants ------------------------------------------------
+readonly EXIT_OK=0
+readonly EXIT_FAIL=1
+readonly EXIT_WARN=2
+
+# -------- paths & state ------------------------------------------------------
+SCRIPT_PATH="$(readlink -f "$0")"
+LOCAL_BIN_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+HOME_DIR="$HOME"
+LOG_DIR="$HOME_DIR/.local/share"
+LOG_FILE="$LOG_DIR/goo-env.log"
+BACKUP_DIR="$LOG_DIR/goo-env-backups"
+WORKSPACE_DIR="$HOME_DIR/workspace"
+TOOLS_DIR="$WORKSPACE_DIR/tools"
+DOTFILES_ZSH_DIR="$TOOLS_DIR/dotfiles-zsh"
+DOTFILES_ENV_DIR="$TOOLS_DIR/dotfiles-env"
+YML_PATH="$DOTFILES_ENV_DIR/goo-environment.yml"
+REQS_PATH="$DOTFILES_ENV_DIR/goo-requirements.txt"
+SETUP_SCRIPT="$TOOLS_DIR/setup_remote_server.sh"
+SECRETS_FILE="$HOME_DIR/.config/secrets.env"
+ZSHRC_LOCAL="$HOME_DIR/.zshrc.local"
+LOCAL_LIB="$HOME_DIR/.local/lib"
+LOCAL_NODE_MODULES="$LOCAL_LIB/node_modules"
+LOCAL_BIN="$LOCAL_BIN_DIR"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-goo}"
+CONDA_BASE_DEFAULT="$HOME_DIR/miniforge3"
+
+# -------- global flags -------------------------------------------------------
+NO_COLOR="${NO_COLOR:-}"
+DRY_RUN="${DRY_RUN:-}"
+GLOBAL_JSON=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-color)  NO_COLOR=1 ;;
+        --dry-run)   DRY_RUN=1 ;;
+        --json)      GLOBAL_JSON=1 ;;
+    esac
+done
+
+# -------- colors -------------------------------------------------------------
+if [[ -t 1 && -z "$NO_COLOR" ]]; then
+    C_OK="\033[32m"      # green
+    C_WARN="\033[33m"    # yellow
+    C_FAIL="\033[31m"    # red
+    C_INFO="\033[36m"    # cyan
+    C_BOLD="\033[1m"
+    C_RESET="\033[0m"
+else
+    C_OK=""; C_WARN=""; C_FAIL=""; C_INFO=""; C_BOLD=""; C_RESET=""
+fi
+
+# -------- log helpers --------------------------------------------------------
+_ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+_log_to_file() {
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    printf '[%s] %s\n' "$(_ts)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info()  { printf "${C_INFO}INFO${C_RESET}  %s\n" "$*"; _log_to_file "INFO  $*"; }
+log_ok()    { printf "${C_OK}OK${C_RESET}    %s\n" "$*"; _log_to_file "OK    $*"; }
+log_warn()  { printf "${C_WARN}WARN${C_RESET}  %s\n" "$*"; _log_to_file "WARN  $*"; }
+log_fail()  { printf "${C_FAIL}FAIL${C_RESET}  %s\n" "$*"; _log_to_file "FAIL  $*"; _log_to_file; }
+log_bold()  { printf "${C_BOLD}%s${C_RESET}\n" "$*"; }
+
+die() {
+    log_fail "$*"
+    exit "$EXIT_FAIL"
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+require_cmd() {
+    if ! have_cmd "$1"; then
+        die "缺少必要命令: $1"
+    fi
+}
+
+run_shell() {
+    if [[ "$DRY_RUN" = "1" ]]; then
+        log_info "[DRY-RUN] $*"
+    else
+        log_info "[RUN] $*"
+        eval "$@"
+    fi
+}
+
+# -------- check result accumulator ------------------------------------------
+declare -a CHECK_RESULTS=()   # "LEVEL|name|detail" lines
+CHECK_FAIL_COUNT=0
+CHECK_WARN_COUNT=0
+CHECK_OK_COUNT=0
+
+record() {
+    # record <OK|WARN|FAIL> <name> <detail>
+    local level="$1" name="$2" detail="$3"
+    CHECK_RESULTS+=("$level|$name|$detail")
+    case "$level" in
+        OK)   ((CHECK_OK_COUNT++))   || true ;;
+        WARN) ((CHECK_WARN_COUNT++)) || true ;;
+        FAIL) ((CHECK_FAIL_COUNT++)) || true ;;
+    esac
+    if [[ "$GLOBAL_JSON" = "1" ]]; then
+        return
+    fi
+    case "$level" in
+        OK)   printf "  ${C_OK}[OK]${C_RESET}   %-30s %s\n" "$name" "$detail" ;;
+        WARN) printf "  ${C_WARN}[WARN]${C_RESET} %-30s %s\n" "$name" "$detail" ;;
+        FAIL) printf "  ${C_FAIL}[FAIL]${C_RESET} %-30s %s\n" "$name" "$detail" ;;
+    esac
+}
+
+# -------- subcommand: check -------------------------------------------------
+cmd_check() {
+    local json_out=0
+    local return_only=0
+    for arg in "$@"; do
+        case "$arg" in
+            --json)       json_out=1 ;;
+            --return-only) return_only=1 ;;
+        esac
+    done
+    if [[ "$json_out" = "1" ]]; then GLOBAL_JSON=1; fi
+
+    CHECK_RESULTS=()
+    CHECK_FAIL_COUNT=0
+    CHECK_WARN_COUNT=0
+    CHECK_OK_COUNT=0
+
+    if [[ "$GLOBAL_JSON" != "1" && "$return_only" != "1" ]]; then
+        log_bold "Goo 环境健康检查"
+    fi
+
+    # 1. secrets.env
+    if [[ -f "$SECRETS_FILE" ]]; then
+        local mode
+        mode="$(stat -c '%a' "$SECRETS_FILE" 2>/dev/null || echo 000)"
+        if [[ "$mode" == "600" ]]; then
+            local n_keys
+            n_keys=$(awk '/^[[:space:]]*export[[:space:]]+(KEDAYA|PIXEL|EVAL_QA|MODELSCOPE|DEEPSEEK|SENSENOVA|MIMO|GOO_PIXEL|SHARE|MINIMAX)_API_KEY/{c++} END{print c+0}' "$SECRETS_FILE" 2>/dev/null)
+            n_keys=${n_keys:-0}
+            if [[ "$n_keys" -ge 8 ]]; then
+                record OK "secrets.env" "mode=600, $n_keys keys"
+            else
+                record WARN "secrets.env" "mode=600, 仅 $n_keys keys (< 8)"
+            fi
+        else
+            record FAIL "secrets.env" "权限 $mode (应为 600)"
+        fi
+    else
+        record WARN "secrets.env" "缺失: $SECRETS_FILE"
+    fi
+
+    # 2. dotfiles-zsh
+    if [[ -L "$HOME_DIR/.zshrc" ]] && readlink "$HOME_DIR/.zshrc" | grep -q "dotfiles-zsh/.zshrc"; then
+        record OK "dotfiles-zsh link" "~/.zshrc -> $(readlink "$HOME_DIR/.zshrc")"
+    elif [[ -f "$HOME_DIR/.zshrc" ]]; then
+        record WARN "dotfiles-zsh link" "~/.zshrc 存在但非 dotfiles 软链"
+    else
+        record WARN "dotfiles-zsh link" "~/.zshrc 不存在"
+    fi
+
+    # 3. Node CLI 软链
+    local cli_targets=("$LOCAL_BIN/claude" "$LOCAL_BIN/codex" "$LOCAL_BIN/ccswitch")
+    local cli_count=0
+    for tgt in "${cli_targets[@]}"; do
+        if [[ -L "$tgt" ]] && [[ -e "$tgt" ]]; then
+            ((cli_count++)) || true
+        fi
+    done
+    if [[ "$cli_count" -eq 3 ]]; then
+        record OK "Node CLI 软链" "claude/codex/ccswitch -> ~/.local/lib/node_modules"
+    else
+        record FAIL "Node CLI 软链" "仅 $cli_count/3 健康"
+    fi
+
+    # 4. PATH 顺序
+    if echo "$PATH" | tr ':' '\n' | head -5 | grep -qx "$LOCAL_BIN"; then
+        record OK "PATH 顺序" "~/.local/bin 在 PATH 前 5"
+    else
+        record FAIL "PATH 顺序" "~/.local/bin 不在 PATH 前 5"
+    fi
+
+    # 5. conda env
+    if [[ "${CONDA_DEFAULT_ENV:-}" == "$CONDA_ENV_NAME" ]] || [[ "${CONDA_SHLVL:-0}" -ge 1 ]]; then
+        record OK "conda env" "已激活 (slvl=${CONDA_SHLVL:-0})"
+    else
+        record WARN "conda env" "未激活 (slvl=${CONDA_SHLVL:-0})"
+    fi
+
+    # 6. yml 备份存在
+    if [[ -f "$YML_PATH" ]]; then
+        local size lines
+        size=$(stat -c '%s' "$YML_PATH")
+        lines=$(wc -l < "$YML_PATH")
+        record OK "yml 备份存在" "$YML_PATH ($size bytes, $lines 行)"
+    else
+        record FAIL "yml 备份存在" "缺失: $YML_PATH (跑: goo-env backup)"
+    fi
+
+    # 7. yml 时效
+    if [[ -f "$YML_PATH" ]]; then
+        local mtime_epoch now_epoch age_days
+        mtime_epoch=$(stat -c '%Y' "$YML_PATH")
+        now_epoch=$(date +%s)
+        age_days=$(( (now_epoch - mtime_epoch) / 86400 ))
+        if [[ "$age_days" -le 30 ]]; then
+            record OK "yml 时效" "${age_days} 天前"
+        elif [[ "$age_days" -le 90 ]]; then
+            record WARN "yml 时效" "${age_days} 天前 (>30 天, 建议 backup)"
+        else
+            record FAIL "yml 时效" "${age_days} 天前 (>90 天, 必须 backup)"
+        fi
+    fi
+
+    # 8. yml 无 prefix
+    if [[ -f "$YML_PATH" ]]; then
+        local prefix_count
+        prefix_count=$(awk '/^prefix:/{c++} END{print c+0}' "$YML_PATH" 2>/dev/null)
+        prefix_count=${prefix_count:-0}
+        if [[ "$prefix_count" -eq 0 ]]; then
+            record OK "yml 无 prefix" "0 行"
+        else
+            record FAIL "yml 无 prefix" "$prefix_count 行残留"
+        fi
+    fi
+
+    # 9. zshrc.local 0 个 key export (P0-3 回归)
+    if [[ -f "$ZSHRC_LOCAL" ]]; then
+        local key_export_count
+        key_export_count=$(awk '/^[[:space:]]*export[[:space:]]+(KEDAYA|PIXEL|EVAL_QA|MODELSCOPE|DEEPSEEK|SENSENOVA|MIMO|GOO_PIXEL|SHARE|MINIMAX)_API_KEY/{c++} END{print c+0}' "$ZSHRC_LOCAL" 2>/dev/null)
+        key_export_count=${key_export_count:-0}
+        if [[ "$key_export_count" -eq 0 ]]; then
+            record OK "zshrc.local 无明文 key" "0 行"
+        else
+            record FAIL "zshrc.local 无明文 key" "$key_export_count 行残留 (P0-3 回归)"
+        fi
+    fi
+
+    # 10. zshrc.local 0 个 goo 硬编码 (P1-1 回归)
+    if [[ -f "$ZSHRC_LOCAL" ]]; then
+        local hardcoded_count
+        hardcoded_count=$(awk '/\.conda\/envs\/goo\/bin\/claude/{c++} END{print c+0}' "$ZSHRC_LOCAL" 2>/dev/null)
+        hardcoded_count=${hardcoded_count:-0}
+        if [[ "$hardcoded_count" -eq 0 ]]; then
+            record OK "zshrc.local 无 goo 硬编码" "0 行 (P1-1 回归)"
+        else
+            record FAIL "zshrc.local 无 goo 硬编码" "$hardcoded_count 行残留"
+        fi
+    fi
+
+    # 11. claude --version
+    if have_cmd claude; then
+        if timeout 5 claude --version >/dev/null 2>&1; then
+            record OK "claude --version" "正常"
+        else
+            record WARN "claude --version" "退出非 0 (5s 超时)"
+        fi
+    else
+        record WARN "claude --version" "claude 不在 PATH"
+    fi
+
+    # 12. codex --version
+    if have_cmd codex; then
+        if timeout 5 codex --version >/dev/null 2>&1; then
+            record OK "codex --version" "正常"
+        else
+            record WARN "codex --version" "退出非 0 (5s 超时)"
+        fi
+    else
+        record WARN "codex --version" "codex 不在 PATH"
+    fi
+
+    # 输出汇总
+    if [[ "$GLOBAL_JSON" = "1" ]]; then
+        printf '{\n'
+        printf '  "ok": %d,\n' "$CHECK_OK_COUNT"
+        printf '  "warn": %d,\n' "$CHECK_WARN_COUNT"
+        printf '  "fail": %d,\n' "$CHECK_FAIL_COUNT"
+        printf '  "checks": [\n'
+        local i=0 n=${#CHECK_RESULTS[@]}
+        for r in "${CHECK_RESULTS[@]}"; do
+            IFS='|' read -r level name detail <<< "$r"
+            i=$((i+1))
+            local sep=','
+            [[ "$i" -eq "$n" ]] && sep=''
+            printf '    {"level":"%s","name":"%s","detail":"%s"}%s\n' \
+                "$level" "$name" "$detail" "$sep"
+        done
+        printf '  ]\n}\n'
+    else
+        printf "\n"
+        log_bold "汇总: ${C_OK}${CHECK_OK_COUNT} OK${C_RESET} / ${C_WARN}${CHECK_WARN_COUNT} WARN${C_RESET} / ${C_FAIL}${CHECK_FAIL_COUNT} FAIL${C_RESET}"
+    fi
+
+    if [[ "$CHECK_FAIL_COUNT" -gt 0 ]]; then
+        return "$EXIT_FAIL"
+    elif [[ "$CHECK_WARN_COUNT" -gt 0 ]]; then
+        return "$EXIT_WARN"
+    fi
+    return "$EXIT_OK"
+}
+
+# 内部用的 check: 不打印标题, 也不 exit, 只返回退出码
+cmd_check_quiet() {
+    cmd_check --return-only
+    return $?
+}
+
+# -------- subcommand: backup ------------------------------------------------
+cmd_backup() {
+    local out_dir=""
+    for arg in "$@"; do
+        case "$arg" in
+            --out) shift; out_dir="${1:-}" ;;
+            --out=*) out_dir="${arg#--out=}" ;;
+        esac
+    done
+
+    if [[ ! -f "$SETUP_SCRIPT" ]]; then
+        log_warn "未找到 setup 脚本: $SETUP_SCRIPT (备份仍会跑, 只是 yml 路径可能与 setup 不同步)"
+    fi
+
+    if ! have_cmd conda; then
+        die "conda 不在 PATH, 无法 export"
+    fi
+
+    log_info "导出 conda env: $CONDA_ENV_NAME -> $YML_PATH"
+    mkdir -p "$DOTFILES_ENV_DIR"
+
+    if [[ "$DRY_RUN" = "1" ]]; then
+        log_info "[DRY-RUN] conda env export -n $CONDA_ENV_NAME | grep -v '^prefix:' > $YML_PATH"
+        log_info "[DRY-RUN] conda run -n $CONDA_ENV_NAME pip freeze > $REQS_PATH"
+    else
+        # 备份旧 yml 加时间戳
+        if [[ -f "$YML_PATH" ]]; then
+            mkdir -p "$BACKUP_DIR"
+            local stamp
+            stamp=$(date '+%Y%m%d_%H%M%S')
+            cp "$YML_PATH" "$BACKUP_DIR/goo-environment.$stamp.yml"
+        fi
+
+        if ! conda env export -n "$CONDA_ENV_NAME" 2>/tmp/goo-env-export.err | grep -v '^prefix:' > "$YML_PATH"; then
+            log_fail "conda env export 失败, 详情: /tmp/goo-env-export.err"
+            return 1
+        fi
+
+        if ! conda run -n "$CONDA_ENV_NAME" pip freeze 2>/tmp/goo-env-pip.err > "$REQS_PATH"; then
+            log_fail "pip freeze 失败, 详情: /tmp/goo-env-pip.err"
+            return 1
+        fi
+
+        # 验证
+        local lines prefix_count
+        lines=$(wc -l < "$YML_PATH")
+        prefix_count=$(awk '/^prefix:/{c++} END{print c+0}' "$YML_PATH" 2>/dev/null)
+        prefix_count=${prefix_count:-0}
+        if [[ "$lines" -lt 200 || "$prefix_count" -gt 0 ]]; then
+            log_fail "yml 验证失败: $lines 行, $prefix_count prefix"
+            return 1
+        fi
+
+        local size
+        size=$(stat -c '%s' "$YML_PATH")
+        log_ok "backup 完成: $YML_PATH ($size bytes, $lines 行)"
+
+        # 可选: 复制到 out_dir
+        if [[ -n "$out_dir" ]]; then
+            mkdir -p "$out_dir"
+            local stamp
+            stamp=$(date '+%Y%m%d_%H%M%S')
+            cp "$YML_PATH" "$out_dir/goo-environment.$stamp.yml"
+            cp "$REQS_PATH" "$out_dir/goo-requirements.$stamp.txt"
+            log_ok "额外副本写入: $out_dir/goo-environment.$stamp.yml"
+        fi
+    fi
+}
+
+# -------- subcommand: install-timer -----------------------------------------
+cmd_install_timer() {
+    local when="06:30"
+    for arg in "$@"; do
+        case "$arg" in
+            --when) shift; when="${1:-06:30}" ;;
+            --when=*) when="${arg#--when=}" ;;
+        esac
+    done
+
+    if ! have_cmd systemctl; then
+        die "systemctl 不在 PATH, 无法装 timer"
+    fi
+
+    mkdir -p "$HOME_DIR/.config/systemd/user"
+
+    # 探测 conda base (systemd unit 不继承 .zshrc, 必须先 source conda.sh)
+    # 探测顺序: $HOME -> 其他用户共享位置 -> command -v conda
+    local conda_base="${CONDA_BASE:-$CONDA_BASE_DEFAULT}"
+    for candidate in \
+        "$HOME_DIR/miniforge3" \
+        "$HOME_DIR/anaconda" \
+        "$HOME_DIR/miniconda3" \
+        "/home/zj/miniforge3" \
+        "/home/zj/anaconda" \
+        "/opt/miniforge3" \
+        "/opt/anaconda"
+    do
+        if [[ -x "$candidate/bin/conda" && -r "$candidate/etc/profile.d/conda.sh" ]]; then
+            conda_base="$candidate"
+            break
+        fi
+    done
+    if [[ ! -r "$conda_base/etc/profile.d/conda.sh" ]]; then
+        # 末位 fallback: 用当前 PATH 里的 conda 反推
+        local conda_path
+        conda_path="$(command -v conda 2>/dev/null || true)"
+        if [[ -n "$conda_path" ]]; then
+            conda_base="$(cd "$(dirname "$(dirname "$conda_path")")" && pwd)"
+        fi
+    fi
+    if [[ ! -r "$conda_base/etc/profile.d/conda.sh" ]]; then
+        log_warn "未找到可读 conda base, 备份会失败: $conda_base"
+    else
+        log_info "conda base 探测: $conda_base"
+    fi
+
+    local service_file="$HOME_DIR/.config/systemd/user/goo-env-backup.service"
+    local timer_file="$HOME_DIR/.config/systemd/user/goo-env-backup.timer"
+
+    if [[ "$DRY_RUN" = "1" ]]; then
+        log_info "[DRY-RUN] 写 $service_file"
+        log_info "[DRY-RUN] 写 $timer_file (OnCalendar=*-*-* $when:00)"
+        log_info "[DRY-RUN] systemctl --user daemon-reload"
+        log_info "[DRY-RUN] systemctl --user enable --now goo-env-backup.timer"
+        return 0
+    fi
+
+    cat > "$service_file" <<'EOF'
+[Unit]
+Description=Goo environment daily backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+# systemd unit runs in a minimal env without conda. Source conda.sh first so that
+# `conda env export` and `conda run -n goo pip freeze` work inside backup.
+# CONDA_BASE is auto-detected at install time and patched below via sed.
+ExecStart=/bin/bash -c 'source "__CONDA_BASE__/etc/profile.d/conda.sh" 2>/dev/null && exec __LOCAL_BIN__/goo-env backup'
+WorkingDirectory=__HOME__
+EOF
+    # patch placeholders
+    sed -i "s|__CONDA_BASE__|$conda_base|g; s|__LOCAL_BIN__|$LOCAL_BIN|g; s|__HOME__|$HOME_DIR|g" "$service_file"
+
+    cat > "$timer_file" <<EOF
+[Unit]
+Description=Goo environment daily backup timer
+
+[Timer]
+OnCalendar=*-*-* $when:00
+Persistent=true
+Unit=goo-env-backup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    log_ok "写入 $service_file"
+    log_ok "写入 $timer_file"
+
+    systemctl --user daemon-reload
+    log_ok "daemon-reload"
+
+    systemctl --user enable --now goo-env-backup.timer
+    log_ok "enable --now goo-env-backup.timer"
+
+    echo
+    systemctl --user list-timers goo-env-backup.timer --no-pager
+}
+
+# -------- subcommand: status ------------------------------------------------
+cmd_status() {
+    log_bold "Goo 环境状态"
+    echo
+    log_bold "[ check 摘要 ]"
+    cmd_check_quiet
+    local rc=$?
+    case "$rc" in
+        "$EXIT_OK")   log_info "  -> 全部 OK" ;;
+        "$EXIT_WARN") log_warn "  -> 有 WARN (非阻塞)" ;;
+        *)            log_fail "  -> 有 FAIL (建议跑 goo-env check 看详情)" ;;
+    esac
+    echo
+    log_bold "[ backup 状态 ]"
+    if [[ -f "$YML_PATH" ]]; then
+        local mtime
+        mtime=$(stat -c '%y' "$YML_PATH" 2>/dev/null | cut -d'.' -f1)
+        local size
+        size=$(stat -c '%s' "$YML_PATH")
+        log_info "yml mtime: $mtime ($size bytes)"
+    else
+        log_warn "yml 不存在, 跑: goo-env backup"
+    fi
+    echo
+    log_bold "[ timer 状态 ]"
+    if have_cmd systemctl; then
+        local active
+        active=$(systemctl --user is-active goo-env-backup.timer 2>/dev/null | tr -d '\n') || active="inactive"
+        case "$active" in
+            active)   log_ok "goo-env-backup.timer: $active" ;;
+            inactive) log_warn "goo-env-backup.timer: $active (跑: goo-env install-timer)" ;;
+            *)        log_fail "goo-env-backup.timer: $active" ;;
+        esac
+    else
+        log_warn "systemctl 不在 PATH"
+    fi
+    echo
+    log_bold "[ secrets 状态 ]"
+    if [[ -f "$SECRETS_FILE" ]]; then
+        local mode mtime
+        mode=$(stat -c '%a' "$SECRETS_FILE")
+        mtime=$(stat -c '%y' "$SECRETS_FILE" 2>/dev/null | cut -d'.' -f1)
+        log_info "secrets.env: mode=$mode, mtime=$mtime"
+    else
+        log_warn "secrets.env 不存在"
+    fi
+    echo
+    log_bold "[ conda env 大小 ]"
+    if [[ -d "$HOME_DIR/.conda/envs/$CONDA_ENV_NAME" ]]; then
+        local sz
+        sz=$(du -sh "$HOME_DIR/.conda/envs/$CONDA_ENV_NAME" 2>/dev/null | cut -f1)
+        log_info "$CONDA_ENV_NAME: $sz"
+    else
+        log_warn "$CONDA_ENV_NAME env 不存在"
+    fi
+}
+
+# -------- subcommand: bootstrap ---------------------------------------------
+# 完整 8 步, 支持 --github-pat / --secrets-from / --secrets-path / --from / --no-timer
+# 也支持环境变量: GITHUB_PAT, SECRETS_FROM_HOST, SECRETS_PATH
+cmd_bootstrap() {
+    local from_repo="${DOTFILES_ZSH_REPO:-https://github.com/ZixiGu/dotfiles-zsh.git}"
+    local dotfiles_env_repo="${DOTFILES_ENV_REPO:-https://github.com/ZixiGu/dotfiles-env.git}"
+    local github_pat="${GITHUB_PAT:-}"
+    local secrets_from_host="${SECRETS_FROM_HOST:-}"
+    local secrets_from_path="${SECRETS_PATH:-}"
+    local secrets_local_path=""
+    local no_timer=0
+    for arg in "$@"; do
+        case "$arg" in
+            --from)            shift; from_repo="${1:-}" ;;
+            --from=*)          from_repo="${arg#--from=}" ;;
+            --github-pat)      shift; github_pat="${1:-}" ;;
+            --github-pat=*)    github_pat="${arg#--github-pat=}" ;;
+            --secrets-from)    shift; secrets_from_host="${1:-}" ;;
+            --secrets-from=*)  secrets_from_host="${arg#--secrets-from=}" ;;
+            --secrets-path)    shift; secrets_local_path="${1:-}" ;;
+            --secrets-path=*)  secrets_local_path="${arg#--secrets-path=}" ;;
+            --no-timer)        no_timer=1 ;;
+        esac
+    done
+    # 兼容 --secrets-from 既指 host 又可指 "user@host:path"
+    if [[ -z "$secrets_from_path" && "$secrets_from_host" != *:* ]]; then
+        secrets_from_path="~/.config/secrets.env"
+    fi
+
+    log_bold "Goo 环境 bootstrap (新机器一条龙)"
+    echo
+    log_info "  HOME          = $HOME_DIR"
+    log_info "  CONDA_ENV     = $CONDA_ENV_NAME"
+    log_info "  DOTFILES_ZSH  = $from_repo"
+    log_info "  DOTFILES_ENV  = $dotfiles_env_repo"
+    if [[ -n "$secrets_from_host" ]]; then
+        log_info "  SECRETS_FROM  = $secrets_from_host:$secrets_from_path"
+    elif [[ -n "$secrets_local_path" ]]; then
+        log_info "  SECRETS_LOCAL = $secrets_local_path"
+    fi
+    echo
+
+    # 0. 准备路径
+    log_info "[0/8] 准备路径..."
+    run_shell "mkdir -p '$WORKSPACE_DIR' '$TOOLS_DIR' '$LOCAL_BIN'"
+
+    # 1. prereq
+    log_info "[1/8] 检查 prereq..."
+    for c in bash curl git tar zsh; do
+        if have_cmd "$c"; then
+            log_ok "  $c"
+        else
+            log_fail "  $c 缺失"
+            die "缺少 prereq: $c"
+        fi
+    done
+
+    # 2. miniforge3
+    log_info "[2/8] 检查 miniforge3..."
+    local conda_base="${CONDA_BASE:-$CONDA_BASE_DEFAULT}"
+    for candidate in "$HOME_DIR/miniforge3" "$HOME_DIR/anaconda" "$HOME_DIR/miniconda3" \
+        "/home/zj/miniforge3" "/home/zj/anaconda" "/opt/miniforge3" "/opt/anaconda"; do
+        if [[ -x "$candidate/bin/conda" ]]; then
+            conda_base="$candidate"
+            break
+        fi
+    done
+    if [[ -x "$conda_base/bin/conda" ]]; then
+        log_ok "  miniforge3 已就绪: $conda_base"
+    else
+        log_info "  装 miniforge3 -> $conda_base"
+        run_shell "curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o /tmp/Miniforge3.sh"
+        run_shell "bash /tmp/Miniforge3.sh -b -p '$conda_base'"
+        run_shell "rm -f /tmp/Miniforge3.sh"
+        log_ok "  miniforge3 装好: $conda_base"
+    fi
+
+    # 3. clone dotfiles-zsh (PUBLIC)
+    log_info "[3/8] clone dotfiles-zsh (PUBLIC)..."
+    if [[ -d "$DOTFILES_ZSH_DIR/.git" ]]; then
+        log_ok "  dotfiles-zsh 已存在: $DOTFILES_ZSH_DIR"
+    else
+        run_shell "git clone '$from_repo' '$DOTFILES_ZSH_DIR'"
+    fi
+    if [[ ! -L "$HOME_DIR/.zshrc" ]]; then
+        run_shell "ln -sf '$DOTFILES_ZSH_DIR/.zshrc' '$HOME_DIR/.zshrc'"
+    fi
+
+    # 4. clone dotfiles-env (PRIVATE, 需要凭据)
+    log_info "[4/8] clone dotfiles-env (PRIVATE)..."
+    if [[ -d "$DOTFILES_ENV_DIR/.git" ]]; then
+        log_ok "  dotfiles-env 已存在: $DOTFILES_ENV_DIR"
+    else
+        # 检测可用凭据: PAT > SSH key > git credential helper
+        local env_url="$dotfiles_env_repo"
+        if [[ -n "$github_pat" ]]; then
+            env_url="https://x-access-token:${github_pat}@github.com/ZixiGu/dotfiles-env.git"
+            log_info "  用 GitHub PAT clone"
+        elif ssh -T -o BatchMode=yes -o ConnectTimeout=3 git@github.com 2>&1 | grep -q 'successfully authenticated'; then
+            env_url="git@github.com:ZixiGu/dotfiles-env.git"
+            log_info "  用 SSH key clone"
+        else
+            log_warn "  未提供 --github-pat 且 SSH key 未配; clone 大概率失败"
+            log_warn "  解决: goo-env bootstrap --github-pat <PAT>   或: 配 SSH key 后重跑"
+        fi
+        run_shell "git clone '$env_url' '$DOTFILES_ENV_DIR'"
+    fi
+
+    # 5. Node CLI
+    log_info "[5/8] Node CLI..."
+    if [[ ! -d "$LOCAL_NODE_MODULES/@anthropic-ai" ]]; then
+        if have_cmd npm; then
+            run_shell "npm install -g @anthropic-ai/claude-code @openai/codex ccswitch"
+        else
+            log_warn "  npm 不在 PATH, 跳过 npm install; 需手工装"
+        fi
+    else
+        log_ok "  node_modules 已就绪"
+    fi
+    for cli in claude:@anthropic-ai/claude-code/bin/claude.exe codex:@openai/codex/bin/codex.js ccswitch:ccswitch/dist/cli.js; do
+        local name="${cli%%:*}"
+        local rel="${cli#*:}"
+        if [[ ! -e "$LOCAL_BIN/$name" ]]; then
+            if [[ -e "$LOCAL_NODE_MODULES/$rel" ]]; then
+                run_shell "ln -sf '$LOCAL_NODE_MODULES/$rel' '$LOCAL_BIN/$name'"
+            else
+                log_warn "  $name 目标不存在: $LOCAL_NODE_MODULES/$rel (需手工装)"
+            fi
+        fi
+    done
+
+    # 6. secrets.env
+    log_info "[6/8] secrets.env..."
+    if [[ -f "$SECRETS_FILE" ]]; then
+        local mode
+        mode=$(stat -c '%a' "$SECRETS_FILE")
+        if [[ "$mode" == "600" ]]; then
+            log_ok "  secrets.env 已就绪: mode=600"
+        else
+            log_warn "  secrets.env 存在但 mode=$mode, 修正中..."
+            run_shell "chmod 600 '$SECRETS_FILE'"
+        fi
+    elif [[ -n "$secrets_from_host" ]]; then
+        # 从远端 scp 拉
+        run_shell "scp '$secrets_from_host:$secrets_from_path' '$SECRETS_FILE'"
+        run_shell "chmod 600 '$SECRETS_FILE'"
+        log_ok "  secrets.env 从 $secrets_from_host 拉到 $SECRETS_FILE"
+    elif [[ -n "$secrets_local_path" && -f "$secrets_local_path" ]]; then
+        run_shell "cp '$secrets_local_path' '$SECRETS_FILE'"
+        run_shell "chmod 600 '$SECRETS_FILE'"
+        log_ok "  secrets.env 从 $secrets_local_path 复制到 $SECRETS_FILE"
+    else
+        log_warn "  secrets.env 不存在, 跳过 (用 --secrets-from 或 --secrets-path 后重跑)"
+        log_warn "  缺 secrets.env 不影响 env 重建, 但 claude/codex wrapper 读不到 key 会 fail"
+    fi
+
+    # 7. 重建 conda env
+    log_info "[7/8] 重建 conda env..."
+    if [[ ! -f "$YML_PATH" ]]; then
+        log_fail "  yml 不存在: $YML_PATH"
+        log_fail "  dotfiles-env clone 可能失败; 检查上一步"
+        return 1
+    fi
+    if [[ -f "$SETUP_SCRIPT" ]]; then
+        run_shell "bash '$SETUP_SCRIPT' --from-yaml '$YML_PATH' --skip-zsh --skip-conda-init"
+    else
+        log_warn "  未找到 $SETUP_SCRIPT, 跳过重建"
+    fi
+
+    # 8. timer
+    log_info "[8/8] systemd timer..."
+    if [[ "$no_timer" = "1" ]]; then
+        log_info "  --no-timer 跳过"
+    else
+        cmd_install_timer
+    fi
+
+    echo
+    log_bold "Bootstrap 完成"
+    log_info "执行: exec zsh -l  &&  goo-env check"
+}
+
+# -------- subcommand: help --------------------------------------------------
+cmd_help() {
+    cat <<EOF
+${C_BOLD}goo-env${C_RESET} — Goo 环境管理 CLI
+
+${C_BOLD}用法${C_RESET}:
+    goo-env <subcommand> [options]
+
+${C_BOLD}子命令${C_RESET}:
+    bootstrap       新机器一条龙部署
+    check           环境健康检查 (OK/WARN/FAIL + 退出码)
+    backup          重建 yml + pip freeze 声明式备份
+    install-timer   装 systemd user timer, 每天自动 backup
+    status          一屏汇总 (check + backup + timer + secrets + env 大小)
+    help            显示本帮助
+
+${C_BOLD}全局 flag${C_RESET}:
+    --no-color      关闭 ANSI 颜色 (NO_COLOR=1 等价)
+    --dry-run       只打印不执行 (DRY_RUN=1 等价)
+
+${C_BOLD}check 子命令 flag${C_RESET}:
+    --json          输出 JSON 供 CI/脚本消费
+
+${C_BOLD}backup 子命令 flag${C_RESET}:
+    --out DIR       额外复制到 DIR, 文件名带时间戳
+
+${C_BOLD}install-timer 子命令 flag${C_RESET}:
+    --when HH:MM    触发时间 (默认 06:30)
+
+${C_BOLD}bootstrap 子命令 flag${C_RESET}:
+    --from URL              dotfiles-zsh git repo URL (默认 ZixiGu/dotfiles-zsh)
+    --github-pat TOKEN      GitHub PAT for dotfiles-env PRIVATE 仓 clone
+    --secrets-from HOST     从 HOST scp 拉 secrets.env
+    --secrets-path PATH     远端 secrets.env 路径 (默认 ~/.config/secrets.env)
+    --no-timer              跳过装 systemd timer
+
+    也支持环境变量: GITHUB_PAT, SECRETS_FROM_HOST, SECRETS_PATH
+
+${C_BOLD}退出码${C_RESET}:
+    0  OK
+    1  FAIL
+    2  WARN
+
+${C_BOLD}示例${C_RESET}:
+    goo-env check                 # 健康检查
+    goo-env check --json          # JSON 输出
+    goo-env backup                # 重建 yml
+    goo-env backup --out ~/back   # 备份到 ~/back
+    goo-env install-timer         # 装 timer (每天 06:30)
+    goo-env status                # 一屏汇总
+    goo-env bootstrap             # 新机器全装
+
+${C_BOLD}日志${C_RESET}: $LOG_FILE
+${C_BOLD}历史 backup${C_RESET}: $BACKUP_DIR
+EOF
+}
+
+# -------- main dispatch -----------------------------------------------------
+SUBCMD="${1:-help}"
+shift || true
+
+case "$SUBCMD" in
+    bootstrap)      cmd_bootstrap "$@" ;;
+    check)          cmd_check "$@" ;;
+    backup)         cmd_backup "$@" ;;
+    install-timer)  cmd_install_timer "$@" ;;
+    status)         cmd_status "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        log_fail "未知子命令: $SUBCMD"
+        echo
+        cmd_help
+        exit "$EXIT_FAIL"
+        ;;
+esac
