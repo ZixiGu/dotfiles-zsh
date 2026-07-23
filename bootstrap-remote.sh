@@ -193,6 +193,15 @@ fi
 
 # -------- 5. Node CLI --------------------------------------------------------
 log_info "[5/8] Node CLI..."
+# 关键: 写 ~/.npmrc 让 npm 全局装到 ~/.local, 避免污染 conda env (npm-prefix fix)
+NPMRC="$HOME_DIR/.npmrc"
+if [[ ! -f "$NPMRC" ]] || ! grep -q 'prefix' "$NPMRC" 2>/dev/null; then
+    log_info "  写 ~/.npmrc (npm 全局装到 ~/.local, 不污染 conda env)"
+    run_shell "printf 'prefix = %s\n' '$HOME_DIR/.local' > '$NPMRC' && chmod 644 '$NPMRC'"
+else
+    log_ok "  ~/.npmrc 已存在 (含 prefix 配置)"
+fi
+
 if [[ ! -d "$LOCAL_NODE_MODULES/@anthropic-ai" ]]; then
     if have_cmd npm; then
         run_shell "npm install -g @anthropic-ai/claude-code @openai/codex ccswitch"
